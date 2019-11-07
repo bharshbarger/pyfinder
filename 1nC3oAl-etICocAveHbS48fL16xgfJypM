@@ -1,0 +1,208 @@
+https://www.rs-online.com/designspark/add-gps-time-and-location-to-a-raspberry-pi-project
+
+
+1. get pi3+ or whatever and a case + battery pack
+2. get gps hat and assemble
+3. put a file called 'ssh' on your raspbian sd card
+4. run raspi-config and disable shell over serial inside peripherals, but keep the controller on
+5. update as necessary (firmware-atheros, for example)
+6. power down and instlal gps hat
+7. install gpsd
+8. Next, we enable the UART and force the mini-UART to be used by Bluetooth, by editing /boot/config.txt and adding the lines:
+
+enable_uart=1
+
+dtoverlay=pi3-miniuart-bt
+
+
+********************************************************
+
+9.We can install >gpsd via:
+
+$ sudo apt-get update
+
+$ sudo apt-get install gpsd gpsd-clients python-gps
+
+To configure we edit /etc/default/gpsd and amend the USBAUTO, DEVICES and GPSD_OPTIONS lines as follows:
+
+USBAUTO="false"
+
+DEVICES="/dev/ttyAMA0"
+
+GPSD_OPTIONS="-n"
+
+
+
+********************************************************
+10.
+To get access to the PPS we need to install the pps-tools software with:
+
+$ sudo apt-get install pps-tools
+
+Add another line to /boot/config.txt to configure the Linux kernel appropriately:
+
+dtoverlay=pps-gpio,gpiopin=4
+
+Following a reboot we can then test:
+
+$ sudo ppstest /dev/pps0
+
+
+********************************************************
+
+11. you will probably have an issue getting a fix. go outside.
+
+********************************************************
+
+12. test python mod from here
+
+https://stackoverflow.com/questions/6146131/python-gps-module-reading-latest-gps-data
+
+import threading
+import time
+from gps import *
+
+class GpsPoller(threading.Thread):
+
+   def __init__(self):
+       threading.Thread.__init__(self)
+       self.session = gps(mode=WATCH_ENABLE)
+       self.current_value = None
+
+   def get_current_value(self):
+       return self.current_value
+
+   def run(self):
+       try:
+            while True:
+                self.current_value = self.session.next()
+                time.sleep(0.2) # tune this, you might not get values that quickly
+       except StopIteration:
+            pass
+
+if __name__ == '__main__':
+
+   gpsp = GpsPoller()
+   gpsp.start()
+   # gpsp now polls every .2 seconds for new data, storing it in self.current_value
+   while 1:
+       # In the main thread, every 5 seconds print the current value
+       time.sleep(5)
+       print gpsp.get_current_value() 
+
+
+********************************************************
+
+13. wifi scanner code from here
+https://raw.githubusercontent.com/NickSanzotta/WiFiSuite/master/wifisuite/modules/scanner.py
+
+# Module: scanner.py
+# Description: Scans the WiFi spectrum and saves output to the WiFiSuite database.
+# Author: Bill Harshbarger 
+# Contributors: Nick Sanzotta/@Beamr
+# Version: v 1.09282017
+try:
+	from scapy.all import *
+	import threading, sched, time, sqlite3, os, sys, signal, re
+	from time import sleep
+	from subprocess import Popen, PIPE, STDOUT 
+	from theme import *
+	from dbcommands import DB
+except Exception as e:
+	print('\n [!] SCANNER - Error %s' % (e))
+	sys.exit(1)
+
+class apScan(threading.Thread):
+	def __init__(self, db_path, location, seconds, supplicantInt, interface):
+		threading.Thread.__init__(self)
+		self.setDaemon(0) # non-daemon
+		self.supplicantInt = supplicantInt
+		self.interface = interface
+		self.location = location
+		self.seconds = seconds
+		self.wirelessInt = str(self.interface.get_ifname())
+		self.iwApDict={}
+		self.chan=''
+		self.signal=''
+		self.security=''
+		self.essid=''
+		self.bssid=''
+		self.encryption = ''
+		self.db_path = db_path
+	
+	def run(self):
+		self.database_connect() # Connect to database
+		# Create iwlist sub process.
+		p1 = subprocess.Popen(['/bin/bash', '-c','iwlist %s scan' % \
+			(self.wirelessInt)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+		# Display stdout and decode as utf-8
+		iwlistOutput = p1.stdout.read().decode('utf-8')
+		lines = iwlistOutput.split('\n')
+
+		# Iterate lines
+		for line in lines:
+			# Strip weirdness
+			line = line.strip()
+			if 'Address:' in line: 
+				self.bssid = str(':'.join(line.split(':')[1:7]))
+			if 'Channel:' in line: 
+				self.chan= str(line.split(':')[1])
+			if 'Signal level' in line: 
+				self.signal=str(line.split('=')[2])
+			if 'ESSID:' in line:
+				self.essid = str(line.split(':')[1])
+			# Determines if Encryption is enable, if not sets the AUTH value to OPEN.
+			if 'Encryption key:' in line:
+				self.encryption = str(line.split(':')[1])
+			if self.encryption == "on":
+				if 'Authentication' in line: 
+					self.security= str(line.split(':')[1])
+			else:
+				self.security= ' OPEN'
+			# Populate dictionary
+			self.iwApDict[self.bssid]=(self.chan, self.signal, self.security, str(self.essid.replace("\x00",' ')))
+		self.output()
+		self.dbcommit()
+
+		def signal_handler(self, signal, frame):
+			print('You pressed Ctrl+C! Exiting...')
+			self.monitor_stop()
+			sys.exit(0)
+
+	def dbcommit(self):
+		# Loop results / loop iwlist output
+		for key in self.iwApDict.items()[1:]:
+			b=key[0]
+			b=b.replace(':','').strip()
+			vals=key[1]
+			c, s, si, e = vals
+			try:
+				self.db.ap_commit(self.location, b, c, s, si, e)
+			except sqlite3.Error as e:
+				print(red('!')+'WARNING - (EAPENUM) Could not save to database: %s' % (e))
+
+	def output(self):
+		# Display Output to end User
+		print(' %-20s %-4s %-6s %-7s %s' %\
+			 ('BSSID', 'CH', 'PWR', 'AUTH', 'ESSID'))
+		print(' %-20s %-4s %-6s %-7s %s' % \
+		     ('-----------------', '--', '---', '----', '----------------'))
+		for key in self.iwApDict.items()[1:]:
+			mac=key[0].replace(' ','') # Clean up leading whitespace with replace
+			vals=key[1]
+			ch, pwr, auth, essid = vals
+			print(' %-20s %-4s %-6s %-7s %s'%\
+			(mac, ch, pwr.replace(' dBm',''), auth, essid))
+		print('\n')
+
+	def database_connect(self):
+		try:
+			self.db = DB(self.db_path)
+		except Exception as e:
+			print(red('!')+'WARNING - (SCANNER) Could not connect to database: %s' % (e))
+			pass
+
+
+
+
+
